@@ -66,9 +66,11 @@ jobs:
         env:
           TF_VAR_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
           TF_VAR_admin_cidr: ${{ steps.runner_ip.outputs.cidr }}
-        run: 
-          terraform init -input=false 
+        run: |
+          # terraform init -input=false 
+          terraform init -input=false -reconfigure
           terraform validate
-          terraform plan 
+          terraform plan
+          # terraform destroy -input=false -auto-approve
           terraform apply -input=false -auto-approve
           terraform output -raw application_url > ../application_url.txt
