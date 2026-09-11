@@ -132,8 +132,10 @@ Access the UI: `terraform output prometheus_url`, then open `http://<ip>:9090` (
 
 **Logging (not yet done):** the app logs structured JSON to stdout, which systemd captures into `journald` on each instance, but there's no centralized log shipping/indexing (e.g. ELK) yet — logs currently have to be read instance-by-instance via `journalctl -u devops-excercise`.
 
-## Known issues / assumptions
+## Known issues / assumptions 
 - Prometheus alerts are visible in the UI only; no Alertmanager/notification channel (Slack, email, PagerDuty) is wired up yet.
 - App instances sit in public subnets with public IPs (needed for the current SSH-based Ansible deploy); a private-subnet + bastion/SSM design would reduce exposure but adds setup complexity.
 - Single environment (`dev`), single region (`us-east-1` by default).
 - `ansible/inventory.ini` is generated at deploy time and isn't committed.
+
+## End
