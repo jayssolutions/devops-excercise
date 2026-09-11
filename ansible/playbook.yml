@@ -4,187 +4,191 @@
   become: true
 
   tasks:
-    - name: Check for existing swap file
-      ansible.builtin.stat:
-        path: /swapfile
-      register: swapfile_stat
-
-    - name: Create 1G swap file (t3.micro's 1GiB RAM is tight for ES+Logstash+Kibana together)
+    - name: ELK stack setup (disabled - repeated Free Tier / OOM / bootstrap failures; flip `when` to re-enable)
+      when: false
       block:
-        - name: Allocate swap file
-          ansible.builtin.command: fallocate -l 1G /swapfile
-        - name: Restrict swap file permissions
-          ansible.builtin.file:
+        - name: Check for existing swap file
+          ansible.builtin.stat:
             path: /swapfile
-            mode: "0600"
-        - name: Format swap file
-          ansible.builtin.command: mkswap /swapfile
-        - name: Enable swap file
-          ansible.builtin.command: swapon /swapfile
-        - name: Persist swap file in fstab
+          register: swapfile_stat
+
+        - name: Create 1G swap file (t3.micro's 1GiB RAM is tight for ES+Logstash+Kibana together)
+          block:
+            - name: Allocate swap file
+              ansible.builtin.command: fallocate -l 1G /swapfile
+            - name: Restrict swap file permissions
+              ansible.builtin.file:
+                path: /swapfile
+                mode: "0600"
+            - name: Format swap file
+              ansible.builtin.command: mkswap /swapfile
+            - name: Enable swap file
+              ansible.builtin.command: swapon /swapfile
+            - name: Persist swap file in fstab
+              ansible.builtin.lineinfile:
+                path: /etc/fstab
+                line: "/swapfile none swap sw 0 0"
+          when: not swapfile_stat.stat.exists
+
+        - name: Add Elastic yum repository
+          ansible.builtin.include_tasks: tasks/setup_elastic_repo.yml
+
+        - name: Install Elasticsearch, Logstash, Kibana
+          ansible.builtin.dnf:
+            name:
+              - "elasticsearch-{{ elastic_stack_version }}"
+              - "logstash-{{ elastic_stack_version }}"
+              - "kibana-{{ elastic_stack_version }}"
+            state: present
+
+        - name: Configure Elasticsearch (single-node, security disabled for this exercise)
+          ansible.builtin.copy:
+            dest: /etc/elasticsearch/elasticsearch.yml
+            content: |
+              cluster.name: devops-excercise-logging
+              node.name: logging-node-1
+              path.data: /var/lib/elasticsearch
+              path.logs: /var/log/elasticsearch
+              network.host: localhost
+              discovery.type: single-node
+              xpack.security.enabled: false
+            mode: "0644"
+          notify: Restart elasticsearch
+
+        - name: Cap Elasticsearch JVM heap for the demo-sized instance
+          ansible.builtin.copy:
+            dest: /etc/elasticsearch/jvm.options.d/heap.options
+            content: |
+              -Xms256m
+              -Xmx256m
+            mode: "0644"
+          notify: Restart elasticsearch
+
+        - name: Cap Logstash JVM heap for the free-tier-eligible instance (t3.micro, 1GiB RAM)
           ansible.builtin.lineinfile:
-            path: /etc/fstab
-            line: "/swapfile none swap sw 0 0"
-      when: not swapfile_stat.stat.exists
-    - name: Add Elastic yum repository
-      ansible.builtin.include_tasks: tasks/setup_elastic_repo.yml
+            path: /etc/logstash/jvm.options
+            regexp: "{{ item.regexp }}"
+            line: "{{ item.line }}"
+          loop:
+            - { regexp: "^-Xms", line: "-Xms256m" }
+            - { regexp: "^-Xmx", line: "-Xmx256m" }
+          notify: Restart logstash
 
-    - name: Install Elasticsearch, Logstash, Kibana
-      ansible.builtin.dnf:
-        name:
-          - "elasticsearch-{{ elastic_stack_version }}"
-          - "logstash-{{ elastic_stack_version }}"
-          - "kibana-{{ elastic_stack_version }}"
-        state: present
+        - name: Persist vm.max_map_count for Elasticsearch
+          ansible.builtin.copy:
+            dest: /etc/sysctl.d/99-elasticsearch.conf
+            content: "vm.max_map_count=262144\n"
+            mode: "0644"
 
-    - name: Configure Elasticsearch (single-node, security disabled for this exercise)
-      ansible.builtin.copy:
-        dest: /etc/elasticsearch/elasticsearch.yml
-        content: |
-          cluster.name: devops-excercise-logging
-          node.name: logging-node-1
-          path.data: /var/lib/elasticsearch
-          path.logs: /var/log/elasticsearch
-          network.host: localhost
-          discovery.type: single-node
-          xpack.security.enabled: false
-        mode: "0644"
-      notify: Restart elasticsearch
+        - name: Apply vm.max_map_count immediately
+          ansible.builtin.command: sysctl -w vm.max_map_count=262144
+          changed_when: false
 
-    - name: Cap Elasticsearch JVM heap for the demo-sized instance
-      ansible.builtin.copy:
-        dest: /etc/elasticsearch/jvm.options.d/heap.options
-        content: |
-          -Xms256m
-          -Xmx256m
-        mode: "0644"
-      notify: Restart elasticsearch
-    
-    - name: Cap Logstash JVM heap for the free-tier-eligible instance (t3.micro, 1GiB RAM)
-      ansible.builtin.lineinfile:
-        path: /etc/logstash/jvm.options
-        regexp: "{{ item.regexp }}"
-        line: "{{ item.line }}"
-      loop:
-        - { regexp: "^-Xms", line: "-Xms256m" }
-        - { regexp: "^-Xmx", line: "-Xmx256m" }
-      notify: Restart logstash
+        - name: Configure Kibana
+          ansible.builtin.lineinfile:
+            path: /etc/kibana/kibana.yml
+            regexp: "{{ item.regexp }}"
+            line: "{{ item.line }}"
+          loop:
+            - { regexp: '^#?server.host:', line: 'server.host: "0.0.0.0"' }
+            - { regexp: '^#?elasticsearch.hosts:', line: 'elasticsearch.hosts: ["http://localhost:9200"]' }
+          notify: Restart kibana
 
-    - name: Persist vm.max_map_count for Elasticsearch
-      ansible.builtin.copy:
-        dest: /etc/sysctl.d/99-elasticsearch.conf
-        content: "vm.max_map_count=262144\n"
-        mode: "0644"
+        - name: Create systemd override directory for Kibana
+          ansible.builtin.file:
+            path: /etc/systemd/system/kibana.service.d
+            state: directory
+            mode: "0755"
 
-    - name: Apply vm.max_map_count immediately
-      ansible.builtin.command: sysctl -w vm.max_map_count=262144
-      changed_when: false
+        - name: Cap Kibana's Node.js heap via systemd override
+          ansible.builtin.copy:
+            dest: /etc/systemd/system/kibana.service.d/heap.conf
+            content: |
+              [Service]
+              Environment=NODE_OPTIONS=--max-old-space-size=256
+            mode: "0644"
+          notify: Restart kibana
 
-    - name: Configure Kibana
-      ansible.builtin.lineinfile:
-        path: /etc/kibana/kibana.yml
-        regexp: "{{ item.regexp }}"
-        line: "{{ item.line }}"
-      loop:
-        - { regexp: '^#?server.host:', line: 'server.host: "0.0.0.0"' }
-        - { regexp: '^#?elasticsearch.hosts:', line: 'elasticsearch.hosts: ["http://localhost:9200"]' }
-      notify: Restart kibana
-    
-    - name: Create systemd override directory for Kibana
-      ansible.builtin.file:
-        path: /etc/systemd/system/kibana.service.d
-        state: directory
-        mode: "0755"
-
-    - name: Cap Kibana's Node.js heap via systemd override
-      ansible.builtin.copy:
-        dest: /etc/systemd/system/kibana.service.d/heap.conf
-        content: |
-          [Service]
-          Environment=NODE_OPTIONS=--max-old-space-size=256
-        mode: "0644"
-      notify: Restart kibana
-
-    - name: Deploy Logstash pipeline for application logs
-      ansible.builtin.copy:
-        dest: /etc/logstash/conf.d/app-logs.conf
-        content: |
-          input {
-            beats {
-              port => 5044
-            }
-          }
-
-          filter {
-            if [message] =~ /^\{.*\}$/ {
-              json {
-                source => "message"
+        - name: Deploy Logstash pipeline for application logs
+          ansible.builtin.copy:
+            dest: /etc/logstash/conf.d/app-logs.conf
+            content: |
+              input {
+                beats {
+                  port => 5044
+                }
               }
-            }
-          }
 
-          output {
-            elasticsearch {
-              hosts => ["http://localhost:9200"]
-              index => "devops-excercise-app-logs-%{+YYYY.MM.dd}"
-            }
-          }
-        mode: "0644"
-      notify: Restart logstash
+              filter {
+                if [message] =~ /^\{.*\}$/ {
+                  json {
+                    source => "message"
+                  }
+                }
+              }
 
-    - name: Start and verify the ELK stack (best-effort; must not block the app deployment)
-      block:
-        - name: Enable and start Elasticsearch
-          ansible.builtin.systemd:
-            name: elasticsearch
-            enabled: true
-            state: started
-            daemon_reload: true
+              output {
+                elasticsearch {
+                  hosts => ["http://localhost:9200"]
+                  index => "devops-excercise-app-logs-%{+YYYY.MM.dd}"
+                }
+              }
+            mode: "0644"
+          notify: Restart logstash
 
-        - name: Wait for Elasticsearch to be ready
-          ansible.builtin.uri:
-            url: http://localhost:9200/_cluster/health
-            status_code: 200
-          register: es_health
-          until: es_health.status == 200
-          retries: 30
-          delay: 5
+        - name: Start and verify the ELK stack (best-effort; must not block the app deployment)
+          block:
+            - name: Enable and start Elasticsearch
+              ansible.builtin.systemd:
+                name: elasticsearch
+                enabled: true
+                state: started
+                daemon_reload: true
 
-        - name: Enable and start Kibana
-          ansible.builtin.systemd:
-            name: kibana
-            enabled: true
-            state: started
-            daemon_reload: true
+            - name: Wait for Elasticsearch to be ready
+              ansible.builtin.uri:
+                url: http://localhost:9200/_cluster/health
+                status_code: 200
+              register: es_health
+              until: es_health.status == 200
+              retries: 30
+              delay: 5
 
-        - name: Enable and start Logstash
-          ansible.builtin.systemd:
-            name: logstash
-            enabled: true
-            state: started
-            daemon_reload: true
+            - name: Enable and start Kibana
+              ansible.builtin.systemd:
+                name: kibana
+                enabled: true
+                state: started
+                daemon_reload: true
 
-      rescue:
-        - name: Capture Elasticsearch journal for diagnostics
-          ansible.builtin.command: journalctl -u elasticsearch --no-pager -n 100
-          register: es_journal
-          changed_when: false
-          failed_when: false
+            - name: Enable and start Logstash
+              ansible.builtin.systemd:
+                name: logstash
+                enabled: true
+                state: started
+                daemon_reload: true
 
-        - name: Capture Elasticsearch's own log for diagnostics
-          ansible.builtin.command: tail -n 100 /var/log/elasticsearch/devops-excercise-logging.log
-          register: es_log
-          changed_when: false
-          failed_when: false
+          rescue:
+            - name: Capture Elasticsearch journal for diagnostics
+              ansible.builtin.command: journalctl -u elasticsearch --no-pager -n 100
+              register: es_journal
+              changed_when: false
+              failed_when: false
 
-        - name: Warn that the ELK stack did not come up cleanly (deployment continues)
-          ansible.builtin.debug:
-            msg: >-
-              WARNING: the ELK logging stack failed to start or become healthy on this host.
-              Continuing with the rest of the deployment; centralized logging will be
-              unavailable until this is investigated. journalctl:
-              {{ es_journal.stdout_lines | default(['(unavailable)']) }}
-              elasticsearch.log: {{ es_log.stdout_lines | default(['(unavailable)']) }}
+            - name: Capture Elasticsearch's own log for diagnostics
+              ansible.builtin.command: tail -n 100 /var/log/elasticsearch/devops-excercise-logging.log
+              register: es_log
+              changed_when: false
+              failed_when: false
+
+            - name: Warn that the ELK stack did not come up cleanly (deployment continues)
+              ansible.builtin.debug:
+                msg: >-
+                  WARNING: the ELK logging stack failed to start or become healthy on this host.
+                  Continuing with the rest of the deployment; centralized logging will be
+                  unavailable until this is investigated. journalctl:
+                  {{ es_journal.stdout_lines | default(['(unavailable)']) }}
+                  elasticsearch.log: {{ es_log.stdout_lines | default(['(unavailable)']) }}
 
   handlers:
     - name: Restart elasticsearch
@@ -273,35 +277,38 @@
         state: started
         daemon_reload: true
 
-    - name: Add Elastic yum repository
-      ansible.builtin.include_tasks: tasks/setup_elastic_repo.yml
+    - name: Ship application logs via Filebeat (disabled - ELK stack setup is disabled; flip `when` to re-enable)
+      when: false
+      block:
+        - name: Add Elastic yum repository
+          ansible.builtin.include_tasks: tasks/setup_elastic_repo.yml
 
-    - name: Install Filebeat
-      ansible.builtin.dnf:
-        name: "filebeat-{{ elastic_stack_version }}"
-        state: present
+        - name: Install Filebeat
+          ansible.builtin.dnf:
+            name: "filebeat-{{ elastic_stack_version }}"
+            state: present
 
-    - name: Configure Filebeat to ship application journal logs to Logstash
-      ansible.builtin.copy:
-        dest: /etc/filebeat/filebeat.yml
-        content: |
-          filebeat.inputs:
-            - type: journald
-              id: {{ app_name }}
-              units:
-                - "{{ app_name }}.service"
+        - name: Configure Filebeat to ship application journal logs to Logstash
+          ansible.builtin.copy:
+            dest: /etc/filebeat/filebeat.yml
+            content: |
+              filebeat.inputs:
+                - type: journald
+                  id: {{ app_name }}
+                  units:
+                    - "{{ app_name }}.service"
 
-          output.logstash:
-            hosts: ["{{ logging_host }}:5044"]
-        mode: "0644"
-      notify: Restart filebeat
+              output.logstash:
+                hosts: ["{{ logging_host }}:5044"]
+            mode: "0644"
+          notify: Restart filebeat
 
-    - name: Enable and start Filebeat
-      ansible.builtin.systemd:
-        name: filebeat
-        enabled: true
-        state: started
-        daemon_reload: true
+        - name: Enable and start Filebeat
+          ansible.builtin.systemd:
+            name: filebeat
+            enabled: true
+            state: started
+            daemon_reload: true
 
   handlers:
     - name: Restart application
