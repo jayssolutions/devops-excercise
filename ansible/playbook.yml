@@ -1,4 +1,129 @@
 ---
+- name: Configure centralized logging (Elasticsearch, Logstash, Kibana)
+  hosts: logging
+  become: true
+
+  tasks:
+    - name: Add Elastic yum repository
+      ansible.builtin.include_tasks: tasks/setup_elastic_repo.yml
+
+    - name: Install Elasticsearch, Logstash, Kibana
+      ansible.builtin.dnf:
+        name:
+          - "elasticsearch-{{ elastic_stack_version }}"
+          - "logstash-{{ elastic_stack_version }}"
+          - "kibana-{{ elastic_stack_version }}"
+        state: present
+
+    - name: Configure Elasticsearch (single-node, security disabled for this exercise)
+      ansible.builtin.copy:
+        dest: /etc/elasticsearch/elasticsearch.yml
+        content: |
+          cluster.name: devops-excercise-logging
+          node.name: logging-node-1
+          path.data: /var/lib/elasticsearch
+          path.logs: /var/log/elasticsearch
+          network.host: localhost
+          discovery.type: single-node
+          xpack.security.enabled: false
+        mode: "0644"
+      notify: Restart elasticsearch
+
+    - name: Cap Elasticsearch JVM heap for the demo-sized instance
+      ansible.builtin.copy:
+        dest: /etc/elasticsearch/jvm.options.d/heap.options
+        content: |
+          -Xms1g
+          -Xmx1g
+        mode: "0644"
+      notify: Restart elasticsearch
+
+    - name: Configure Kibana
+      ansible.builtin.lineinfile:
+        path: /etc/kibana/kibana.yml
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+      loop:
+        - { regexp: '^#?server.host:', line: 'server.host: "0.0.0.0"' }
+        - { regexp: '^#?elasticsearch.hosts:', line: 'elasticsearch.hosts: ["http://localhost:9200"]' }
+      notify: Restart kibana
+
+    - name: Deploy Logstash pipeline for application logs
+      ansible.builtin.copy:
+        dest: /etc/logstash/conf.d/app-logs.conf
+        content: |
+          input {
+            beats {
+              port => 5044
+            }
+          }
+
+          filter {
+            if [message] =~ /^\{.*\}$/ {
+              json {
+                source => "message"
+              }
+            }
+          }
+
+          output {
+            elasticsearch {
+              hosts => ["http://localhost:9200"]
+              index => "devops-excercise-app-logs-%{+YYYY.MM.dd}"
+            }
+          }
+        mode: "0644"
+      notify: Restart logstash
+
+    - name: Enable and start Elasticsearch
+      ansible.builtin.systemd:
+        name: elasticsearch
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    - name: Wait for Elasticsearch to be ready
+      ansible.builtin.uri:
+        url: http://localhost:9200/_cluster/health
+        status_code: 200
+      register: es_health
+      until: es_health.status == 200
+      retries: 30
+      delay: 5
+
+    - name: Enable and start Kibana
+      ansible.builtin.systemd:
+        name: kibana
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    - name: Enable and start Logstash
+      ansible.builtin.systemd:
+        name: logstash
+        enabled: true
+        state: started
+        daemon_reload: true
+
+  handlers:
+    - name: Restart elasticsearch
+      ansible.builtin.systemd:
+        name: elasticsearch
+        state: restarted
+        daemon_reload: true
+
+    - name: Restart kibana
+      ansible.builtin.systemd:
+        name: kibana
+        state: restarted
+        daemon_reload: true
+
+    - name: Restart logstash
+      ansible.builtin.systemd:
+        name: logstash
+        state: restarted
+        daemon_reload: true
+
 - name: Configure and deploy Node.js application
   hosts: app
   become: true
@@ -67,9 +192,45 @@
         state: started
         daemon_reload: true
 
+    - name: Add Elastic yum repository
+      ansible.builtin.include_tasks: tasks/setup_elastic_repo.yml
+
+    - name: Install Filebeat
+      ansible.builtin.dnf:
+        name: "filebeat-{{ elastic_stack_version }}"
+        state: present
+
+    - name: Configure Filebeat to ship application journal logs to Logstash
+      ansible.builtin.copy:
+        dest: /etc/filebeat/filebeat.yml
+        content: |
+          filebeat.inputs:
+            - type: journald
+              id: {{ app_name }}
+              units:
+                - "{{ app_name }}.service"
+
+          output.logstash:
+            hosts: ["{{ logging_host }}:5044"]
+        mode: "0644"
+      notify: Restart filebeat
+
+    - name: Enable and start Filebeat
+      ansible.builtin.systemd:
+        name: filebeat
+        enabled: true
+        state: started
+        daemon_reload: true
+
   handlers:
     - name: Restart application
       ansible.builtin.systemd:
         name: "{{ app_name }}"
+        state: restarted
+        daemon_reload: true
+
+    - name: Restart filebeat
+      ansible.builtin.systemd:
+        name: filebeat
         state: restarted
         daemon_reload: true
