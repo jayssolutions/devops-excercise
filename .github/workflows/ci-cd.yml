@@ -50,6 +50,19 @@ jobs:
         with:
           terraform_version: "1.10.5"
       
+      - name: Setup Python & Ansible
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Ansible Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install ansible
+          if [ -f ansible/requirements.yml ]; then
+            ansible-galaxy collection install -r ansible/requirements.yml
+          fi
+
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -74,3 +87,58 @@ jobs:
           # terraform destroy -input=false -auto-approve
           terraform apply -input=false -auto-approve
           terraform output -raw application_url > ../application_url.txt
+      
+      - name: Build Deployment Archive
+        run: tar --exclude=node_modules -czf app.tar.gz -C app .
+
+      - name: Configure SSH Private Key
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%b' "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_ed25519          
+          chmod 600 ~/.ssh/id_ed25519
+
+      - name: Build Ansible Inventory
+        run: |
+          chmod +x scripts/build_inventory.sh
+          ./scripts/build_inventory.sh
+
+      - name: Wait for SSH Availability
+        run: |
+          INSTANCE_IPS=$(grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' ./ansible/inventory.ini)
+          for TARGET_IP in $INSTANCE_IPS; do
+            echo "Waiting for SSH to become ready on $TARGET_IP..."
+            RETRIES=0
+            until nc -z -v -w5 "$TARGET_IP" 22; do
+              RETRIES=$((RETRIES + 1))
+              if [ "$RETRIES" -ge 24 ]; then
+                echo "SSH on $TARGET_IP did not become ready in time."
+                exit 1
+              fi
+              echo "Waiting for Port 22..."
+              sleep 5
+            done
+            echo "SSH ready on $TARGET_IP."
+          done
+
+      - name: Deploy with Ansible
+        env:
+          APP_ARCHIVE: "../app.tar.gz"
+          ANSIBLE_HOST_KEY_CHECKING: "False"
+        working-directory: ansible
+        run: |
+          ansible-playbook playbook.yml --private-key ~/.ssh/id_ed25519
+
+      - name: Smoke Test
+        run: |
+          APP_URL=$(cat application_url.txt)
+          echo "Performing smoke test on $APP_URL/health..."
+          for i in {1..12}; do
+            if curl -fsS "$APP_URL/health"; then
+              echo "Smoke test passed!"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "Smoke test failed."
+          exit 1
