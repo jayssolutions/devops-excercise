@@ -16,5 +16,5 @@ variable "public_key" {
 variable "instance_type" {
   description = "Instance type for the ELK logging host (Elasticsearch + Logstash + Kibana together need more headroom than the app/monitoring instances)"
   type        = string
-  default     = "t3.medium"
+  default     = "t3.micro"
 }

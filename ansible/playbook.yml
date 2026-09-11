@@ -4,6 +4,28 @@
   become: true
 
   tasks:
+    - name: Check for existing swap file
+      ansible.builtin.stat:
+        path: /swapfile
+      register: swapfile_stat
+
+    - name: Cap Elasticsearch JVM heap for the free-tier-eligible instance (t3.micro, 1GiB RAM)
+      block:
+        - name: Allocate swap file
+          ansible.builtin.command: fallocate -l 1G /swapfile
+        - name: Restrict swap file permissions
+          ansible.builtin.file:
+            path: /swapfile
+            mode: "0600"
+        - name: Format swap file
+          ansible.builtin.command: mkswap /swapfile
+        - name: Enable swap file
+          ansible.builtin.command: swapon /swapfile
+        - name: Persist swap file in fstab
+          ansible.builtin.lineinfile:
+            path: /etc/fstab
+            line: "/swapfile none swap sw 0 0"
+      when: not swapfile_stat.stat.exists
     - name: Add Elastic yum repository
       ansible.builtin.include_tasks: tasks/setup_elastic_repo.yml
 
@@ -33,10 +55,20 @@
       ansible.builtin.copy:
         dest: /etc/elasticsearch/jvm.options.d/heap.options
         content: |
-          -Xms1g
-          -Xmx1g
+          -Xms256m
+          -Xmx256m
         mode: "0644"
       notify: Restart elasticsearch
+    
+    - name: Cap Logstash JVM heap for the free-tier-eligible instance (t3.micro, 1GiB RAM)
+      ansible.builtin.lineinfile:
+        path: /etc/logstash/jvm.options
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+      loop:
+        - { regexp: "^-Xms", line: "-Xms256m" }
+        - { regexp: "^-Xmx", line: "-Xmx256m" }
+      notify: Restart logstash
 
     - name: Configure Kibana
       ansible.builtin.lineinfile:
@@ -46,6 +78,21 @@
       loop:
         - { regexp: '^#?server.host:', line: 'server.host: "0.0.0.0"' }
         - { regexp: '^#?elasticsearch.hosts:', line: 'elasticsearch.hosts: ["http://localhost:9200"]' }
+      notify: Restart kibana
+    
+    - name: Create systemd override directory for Kibana
+      ansible.builtin.file:
+        path: /etc/systemd/system/kibana.service.d
+        state: directory
+        mode: "0755"
+
+    - name: Cap Kibana's Node.js heap via systemd override
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/kibana.service.d/heap.conf
+        content: |
+          [Service]
+          Environment=NODE_OPTIONS=--max-old-space-size=256
+        mode: "0644"
       notify: Restart kibana
 
     - name: Deploy Logstash pipeline for application logs
