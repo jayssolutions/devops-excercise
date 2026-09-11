@@ -132,7 +132,7 @@
         mode: "0644"
       notify: Restart logstash
 
-    - name: Start Elasticsearch, surfacing diagnostics on failure
+    - name: Start and verify the ELK stack (best-effort; must not block the app deployment)
       block:
         - name: Enable and start Elasticsearch
           ansible.builtin.systemd:
@@ -140,40 +140,51 @@
             enabled: true
             state: started
             daemon_reload: true
+
+        - name: Wait for Elasticsearch to be ready
+          ansible.builtin.uri:
+            url: http://localhost:9200/_cluster/health
+            status_code: 200
+          register: es_health
+          until: es_health.status == 200
+          retries: 30
+          delay: 5
+
+        - name: Enable and start Kibana
+          ansible.builtin.systemd:
+            name: kibana
+            enabled: true
+            state: started
+            daemon_reload: true
+
+        - name: Enable and start Logstash
+          ansible.builtin.systemd:
+            name: logstash
+            enabled: true
+            state: started
+            daemon_reload: true
+
       rescue:
         - name: Capture Elasticsearch journal for diagnostics
           ansible.builtin.command: journalctl -u elasticsearch --no-pager -n 100
           register: es_journal
           changed_when: false
-        - name: Show Elasticsearch journal
+          failed_when: false
+
+        - name: Capture Elasticsearch's own log for diagnostics
+          ansible.builtin.command: tail -n 100 /var/log/elasticsearch/devops-excercise-logging.log
+          register: es_log
+          changed_when: false
+          failed_when: false
+
+        - name: Warn that the ELK stack did not come up cleanly (deployment continues)
           ansible.builtin.debug:
-            var: es_journal.stdout_lines
-        - name: Fail with diagnostics surfaced above
-          ansible.builtin.fail:
-            msg: "Elasticsearch failed to start; see journal output above."
-
-    - name: Wait for Elasticsearch to be ready
-      ansible.builtin.uri:
-        url: http://localhost:9200/_cluster/health
-        status_code: 200
-      register: es_health
-      until: es_health.status == 200
-      retries: 30
-      delay: 5
-
-    - name: Enable and start Kibana
-      ansible.builtin.systemd:
-        name: kibana
-        enabled: true
-        state: started
-        daemon_reload: true
-
-    - name: Enable and start Logstash
-      ansible.builtin.systemd:
-        name: logstash
-        enabled: true
-        state: started
-        daemon_reload: true
+            msg: >-
+              WARNING: the ELK logging stack failed to start or become healthy on this host.
+              Continuing with the rest of the deployment; centralized logging will be
+              unavailable until this is investigated. journalctl:
+              {{ es_journal.stdout_lines | default(['(unavailable)']) }}
+              elasticsearch.log: {{ es_log.stdout_lines | default(['(unavailable)']) }}
 
   handlers:
     - name: Restart elasticsearch
