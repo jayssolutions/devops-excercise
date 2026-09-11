@@ -9,7 +9,7 @@
         path: /swapfile
       register: swapfile_stat
 
-    - name: Cap Elasticsearch JVM heap for the free-tier-eligible instance (t3.micro, 1GiB RAM)
+    - name: Create 1G swap file (t3.micro's 1GiB RAM is tight for ES+Logstash+Kibana together)
       block:
         - name: Allocate swap file
           ansible.builtin.command: fallocate -l 1G /swapfile
@@ -70,6 +70,16 @@
         - { regexp: "^-Xmx", line: "-Xmx256m" }
       notify: Restart logstash
 
+    - name: Persist vm.max_map_count for Elasticsearch
+      ansible.builtin.copy:
+        dest: /etc/sysctl.d/99-elasticsearch.conf
+        content: "vm.max_map_count=262144\n"
+        mode: "0644"
+
+    - name: Apply vm.max_map_count immediately
+      ansible.builtin.command: sysctl -w vm.max_map_count=262144
+      changed_when: false
+
     - name: Configure Kibana
       ansible.builtin.lineinfile:
         path: /etc/kibana/kibana.yml
@@ -122,12 +132,25 @@
         mode: "0644"
       notify: Restart logstash
 
-    - name: Enable and start Elasticsearch
-      ansible.builtin.systemd:
-        name: elasticsearch
-        enabled: true
-        state: started
-        daemon_reload: true
+    - name: Start Elasticsearch, surfacing diagnostics on failure
+      block:
+        - name: Enable and start Elasticsearch
+          ansible.builtin.systemd:
+            name: elasticsearch
+            enabled: true
+            state: started
+            daemon_reload: true
+      rescue:
+        - name: Capture Elasticsearch journal for diagnostics
+          ansible.builtin.command: journalctl -u elasticsearch --no-pager -n 100
+          register: es_journal
+          changed_when: false
+        - name: Show Elasticsearch journal
+          ansible.builtin.debug:
+            var: es_journal.stdout_lines
+        - name: Fail with diagnostics surfaced above
+          ansible.builtin.fail:
+            msg: "Elasticsearch failed to start; see journal output above."
 
     - name: Wait for Elasticsearch to be ready
       ansible.builtin.uri:
