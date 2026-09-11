@@ -5,7 +5,7 @@ resource "aws_s3_bucket" "state" {
   tags = {
     Environment = "dev"
     ManagedBy   = "Terraform"
-  } 
+  }
 }
 
 # Enable versioning so you can revert/recover previous state files

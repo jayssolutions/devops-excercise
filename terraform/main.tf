@@ -24,10 +24,19 @@ module "compute" {
   public_key         = var.public_key
 }
 
+module "monitoring" {
+  source            = "./modules/monitoring"
+  project_name      = var.project_name
+  vpc_id            = module.network.vpc_id
+  public_subnet_ids = module.network.public_subnet_ids
+  admin_cidr        = var.admin_cidr
+  public_key        = var.public_key
+  app_targets       = [for ip in module.compute.instance_private_ips : "${ip}:3000"]
+} 
 
 # Create the S3 State Bucket
 module "state" {
-  source = "./modules/s3"
+  source        = "./modules/s3"
   bucket_name   = "jays-devops-tf-state-bucket"
   force_destroy = false
 

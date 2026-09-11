@@ -1,0 +1,41 @@
+groups:
+  - name: app-alerts
+    rules:
+      - alert: HighErrorRate
+        expr: |
+          sum(rate(http_request_duration_seconds_count{status_code=~"5.."}[5m]))
+          /
+          sum(rate(http_request_duration_seconds_count[5m])) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High HTTP 5xx error rate"
+          description: "More than 5% of requests have failed with 5xx errors over the last 5 minutes."
+
+      - alert: HighProcessCPU
+        expr: rate(process_cpu_seconds_total{job="devops-excercise-app"}[5m]) > 0.8
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High application CPU usage"
+          description: "Node.js process CPU usage has been above 80% for 5 minutes on {{ $labels.instance }}."
+
+      - alert: HighProcessMemory
+        expr: process_resident_memory_bytes{job="devops-excercise-app"} > 400 * 1024 * 1024
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High application memory usage"
+          description: "Node.js process resident memory has exceeded 400MB on {{ $labels.instance }}."
+
+      - alert: AppTargetDown
+        expr: up{job="devops-excercise-app"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Application instance unreachable"
+          description: "Prometheus has not been able to scrape {{ $labels.instance }} for 2 minutes."
