@@ -34,6 +34,17 @@ module "monitoring" {
   app_targets       = [for ip in module.compute.instance_private_ips : "${ip}:3000"]
 } 
 
+# Allow Prometheus to scrape the app instances' /metrics endpoint
+resource "aws_security_group_rule" "prometheus_scrape_app" {
+  type                     = "ingress"
+  from_port                = 3000
+  to_port                  = 3000
+  protocol                 = "tcp"
+  security_group_id        = module.compute.app_security_group_id
+  source_security_group_id = module.monitoring.prometheus_security_group_id
+  description              = "Prometheus scraping app /metrics"
+}
+
 # Create the S3 State Bucket
 module "state" {
   source        = "./modules/s3"
